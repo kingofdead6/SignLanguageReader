@@ -1,0 +1,12 @@
+# Python 3.13 compatible (also works on 3.10 - 3.12)
+# MediaPipe >= 0.10.35 ships py3-none wheels (version-independent) and
+# removed the legacy solutions API — this project uses the new Tasks API.
+mediapipe>=0.10.35
+opencv-python>=4.10
+numpy>=2.0
+torch>=2.6
+scikit-learn>=1.5
+kagglehub>=0.3
+tqdm>=4.66
+fastapi>=0.110
+uvicorn[standard]>=0.29
