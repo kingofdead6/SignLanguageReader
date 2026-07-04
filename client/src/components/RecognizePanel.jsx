@@ -1,0 +1,205 @@
+import { useEffect, useRef, useState } from "react";
+import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
+import { WS_URLS } from "../lib/api";
+import { drawSkeleton } from "../lib/hand";
+
+const SEND_FPS = 20;
+const ACCENT = "#2de1c2";
+
+export default function RecognizePanel() {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const wsRef = useRef(null);
+  const stateRef = useRef({ alive: true, wsIdx: 0, lastSend: 0, raf: 0 });
+
+  const [status, setStatus] = useState("loading hand tracker…");
+  const [live, setLive] = useState(false);
+  const [gesture, setGesture] = useState("–");
+  const [confidence, setConfidence] = useState(0);
+  const [sentence, setSentence] = useState("");
+  const [flash, setFlash] = useState(0); // increments to retrigger animation
+
+  useEffect(() => {
+    const S = stateRef.current;
+    S.alive = true;
+    let landmarker = null;
+    let stream = null;
+
+    function connect() {
+      if (!S.alive) return;
+      const url = WS_URLS[S.wsIdx % WS_URLS.length];
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      let opened = false;
+      ws.onopen = () => {
+        opened = true;
+        setLive(true);
+        setStatus(`live · ${url}`);
+      };
+      ws.onclose = () => {
+        if (!S.alive) return;
+        if (!opened) S.wsIdx++; // never connected -> try the other host
+        setLive(false);
+        setStatus(`API disconnected — retrying ${WS_URLS[S.wsIdx % WS_URLS.length]} …`);
+        setTimeout(connect, 1500);
+      };
+      ws.onmessage = (e) => {
+        let d;
+        try { d = JSON.parse(e.data); } catch { return; } // ignore non-JSON
+        if (!d || d.type !== "frame") return;
+        setGesture(d.gesture === "nothing" ? "–" : d.gesture);
+        setConfidence(d.confidence);
+        setSentence(d.sentence);
+        if (d.committed) setFlash((f) => f + 1);
+      };
+    }
+
+    async function init() {
+      const fileset = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+      );
+      landmarker = await HandLandmarker.createFromOptions(fileset, {
+        baseOptions: {
+          modelAssetPath:
+            "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU",
+        },
+        runningMode: "VIDEO",
+        numHands: 1,
+      });
+      if (!S.alive) return;
+
+      setStatus("requesting camera…");
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480 },
+        audio: false,
+      });
+      const video = videoRef.current;
+      if (!S.alive || !video) return;
+      video.srcObject = stream;
+      await new Promise((r) => (video.onloadedmetadata = r));
+      const canvas = canvasRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      connect();
+      loop();
+    }
+
+    function loop() {
+      if (!S.alive) return;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (landmarker && video && video.readyState >= 2) {
+        const result = landmarker.detectForVideo(video, performance.now());
+        const hand = result.landmarks && result.landmarks[0];
+
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        if (hand) {
+          drawSkeleton(
+            ctx,
+            hand.map((p) => [p.x * canvas.width, p.y * canvas.height]),
+            ACCENT
+          );
+        }
+
+        const ws = wsRef.current;
+        const now = performance.now();
+        if (ws && ws.readyState === 1 && now - S.lastSend > 1000 / SEND_FPS) {
+          S.lastSend = now;
+          ws.send(
+            JSON.stringify(
+              hand
+                ? {
+                    type: "landmarks",
+                    landmarks: hand.map((p) => [
+                      +p.x.toFixed(4), +p.y.toFixed(4), +p.z.toFixed(4),
+                    ]),
+                  }
+                : { type: "empty" }
+            )
+          );
+        }
+      }
+      S.raf = requestAnimationFrame(loop);
+    }
+
+    init().catch((err) => setStatus("error: " + err.message));
+
+    return () => {
+      S.alive = false;
+      cancelAnimationFrame(S.raf);
+      if (wsRef.current) wsRef.current.close();
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (landmarker) landmarker.close();
+    };
+  }, []);
+
+  const clear = () => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "clear" }));
+  };
+
+  return (
+    <section className="bg-panel border border-edge rounded-2xl p-5 flex flex-col gap-4">
+      <header className="flex items-baseline justify-between">
+        <h2 className="font-display font-700 tracking-wide text-recognize">
+          CAMERA → TEXT
+        </h2>
+        <span className={`text-xs ${live ? "text-recognize" : "text-mist"}`}>
+          {live ? "● " : ""}{status}
+        </span>
+      </header>
+
+      <div className="relative rounded-xl overflow-hidden bg-well">
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-full block -scale-x-100"
+        />
+        <canvas
+          ref={canvasRef}
+          className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100"
+        />
+      </div>
+
+      <div className="flex items-center gap-4">
+        <div
+          key={flash}
+          className={`font-display text-5xl font-700 min-w-16 text-center text-recognize ${
+            flash ? "commit-flash" : ""
+          }`}
+        >
+          {gesture}
+        </div>
+        <div className="flex-1">
+          <div className="h-1.5 rounded bg-edge overflow-hidden">
+            <div
+              className="h-full bg-recognize transition-[width] duration-100"
+              style={{ width: `${Math.round(confidence * 100)}%` }}
+            />
+          </div>
+          <div className="text-xs text-mist mt-1">
+            {Math.round(confidence * 100)}% confidence
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-well border border-edge rounded-xl px-4 py-3">
+        <span className="text-xl tracking-widest break-all">{sentence}</span>
+        <span className="inline-block w-0.5 h-5 align-text-bottom bg-recognize cursor-blink" />
+      </div>
+
+      <button
+        onClick={clear}
+        className="self-start text-sm text-mist border border-edge rounded-lg px-4 py-2
+                   hover:text-recognize hover:border-recognize transition-colors"
+      >
+        Clear sentence
+      </button>
+    </section>
+  );
+}

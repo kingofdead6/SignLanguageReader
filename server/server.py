@@ -38,7 +38,6 @@ import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from train import GestureMLP
@@ -55,7 +54,40 @@ COOLDOWN = 1.2         # seconds before the SAME letter can repeat
 ALLOWED_ORIGINS = ["*"]
 # -------------------------------------------
 
+DEBUG = True   # set False to silence [debug] prints
+
+
+def dbg(*args):
+    if DEBUG:
+        print("[debug]", *args, flush=True)
+
+
+class ConnectionLogger:
+    """Pure ASGI middleware: logs EVERY incoming http/websocket attempt,
+    including ones that fail before reaching a route."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            client = scope.get("client") or ("?", "?")
+            dbg(f"{scope['type'].upper():9s} {scope.get('path')} "
+                f"from {client[0]}:{client[1]}")
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Sign Language Prediction API")
+app.add_middleware(ConnectionLogger)
+
+
+@app.on_event("shutdown")
+async def _log_shutdown():
+    # If you see this without wanting to stop the server: on Windows,
+    # Ctrl+C (even to COPY terminal text) kills the process, and clicking
+    # inside the console can pause it (press Esc to resume).
+    print("[lifespan] SHUTDOWN signal received (Ctrl+C / SIGTERM / window "
+          "closed) — the server is stopping NOW.", flush=True)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -158,11 +190,19 @@ class Session:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
+    client = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
+    dbg(f"WS upgrade request from {client}")
     await ws.accept()
+    dbg(f"WS ACCEPTED {client} — session started")
     session = Session()
+    n_msgs = 0
     try:
         while True:
             raw = await ws.receive_text()
+            n_msgs += 1
+            if n_msgs == 1 or n_msgs % 100 == 0:
+                dbg(f"WS {client}: {n_msgs} messages received "
+                    f"(sentence='{session.sentence}')")
             try:
                 msg = json.loads(raw)
             except json.JSONDecodeError:
@@ -204,14 +244,130 @@ async def ws_endpoint(ws: WebSocket):
                     "sentence": session.sentence,
                     "committed": committed,
                 }))
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as e:
+        dbg(f"WS {client} disconnected cleanly (code={e.code}, "
+            f"{n_msgs} messages total)")
+    except Exception as e:
+        import traceback
+        print(f"[debug] WS {client} CRASHED: {type(e).__name__}: {e}",
+              flush=True)
+        traceback.print_exc()
 
 
-# ---------------- Local convenience: serve the demo page ----------------
+# ---------------- Text -> Sign: letter poses for the client animation ----
+# Animation timing lives SERVER-side so every client renders consistently.
+SIGN_TRANSITION_MS = 380   # morph between letters
+SIGN_HOLD_MS = 680         # hold each letter
+
+_POSES_CACHE: dict = {}
+
+
+def load_poses() -> dict:
+    """Load model/poses.json once and cache. 404 with instructions if absent."""
+    if _POSES_CACHE:
+        return _POSES_CACHE
+    path = MODEL_DIR / "poses.json"
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="poses.json not found — run `python export_poses.py` "
+                   "after extract_landmarks.py, then restart the server.")
+    with open(path) as f:
+        _POSES_CACHE.update(json.load(f))
+    return _POSES_CACHE
+
+
+def _ease(t: float) -> float:
+    """Cubic in-out — same curve the reference client uses."""
+    return 4 * t * t * t if t < 0.5 else 1 - ((-2 * t + 2) ** 3) / 2
+
+
+@app.get("/poses")
+def poses():
+    return load_poses()
+
+
+class SignIn(BaseModel):
+    text: str
+    fps: int | None = None   # if set, server bakes interpolated frames
+
+
+@app.post("/sign")
+def sign(body: SignIn):
+    """
+    Convert text into a signing animation.
+
+    Default response: compact letter sequence + timing — the client
+    interpolates between poses itself.
+
+    With "fps" (e.g. 30): additionally returns fully-baked "frames" —
+    every interpolated hand pose with timestamps. A renderer then needs
+    ZERO animation logic: draw frame i, wait 1000/fps ms, repeat.
+    """
+    all_poses = load_poses()
+    rest = all_poses.get("B") or next(iter(all_poses.values()))
+
+    sequence, skipped = [], []
+    for ch in body.text.upper():
+        if ch == " " and "space" in all_poses:
+            sequence.append({"ch": " ", "pose": all_poses["space"]})
+        elif ch in all_poses:
+            sequence.append({"ch": ch, "pose": all_poses[ch]})
+        elif ch.strip():
+            skipped.append(ch)
+
+    if not sequence:
+        raise HTTPException(status_code=422,
+                            detail="No signable characters in text.")
+
+    resp = {
+        "rest_pose": rest,
+        "transition_ms": SIGN_TRANSITION_MS,
+        "hold_ms": SIGN_HOLD_MS,
+        "sequence": sequence,
+        "skipped": skipped,
+    }
+
+    if body.fps:
+        fps = max(5, min(int(body.fps), 60))
+        step = 1000.0 / fps
+        frames, t = [], 0.0
+        prev = rest
+        steps_tr = max(1, round(SIGN_TRANSITION_MS / step))
+        steps_hold = max(1, round(SIGN_HOLD_MS / step))
+        chain = sequence + [{"ch": None, "pose": rest}]  # ease back to rest
+        for item in chain:
+            target = item["pose"]
+            for i in range(1, steps_tr + 1):        # transition
+                k = _ease(i / steps_tr)
+                frames.append({
+                    "t_ms": round(t), "ch": item["ch"],
+                    "pose": [[round(a[0] + (b[0] - a[0]) * k, 4),
+                              round(a[1] + (b[1] - a[1]) * k, 4)]
+                             for a, b in zip(prev, target)],
+                })
+                t += step
+            hold_pose = [[round(p[0], 4), round(p[1], 4)] for p in target]
+            hold_steps = steps_hold if item["ch"] is not None else 1
+            for _ in range(hold_steps):             # hold
+                frames.append({"t_ms": round(t), "ch": item["ch"],
+                               "pose": hold_pose})
+                t += step
+            prev = target
+        resp["fps"] = fps
+        resp["frames"] = frames
+
+    return resp
+
+
+# ---------------- API root ----------------
 @app.get("/")
 def index():
-    return FileResponse(Path(__file__).resolve().parent / "index.html")
+    return {
+        "name": "Sign Language Prediction API",
+        "endpoints": ["/health", "/poses", "/predict", "/sign", "/ws"],
+        "frontend": "run the React app in ../frontend (npm run dev)",
+    }
 
 
 def _check_websocket_support():
@@ -236,8 +392,17 @@ def _check_websocket_support():
 
 
 if __name__ == "__main__":
+    import platform
     import uvicorn
     ws_lib = _check_websocket_support()
+    ws_mod = __import__(ws_lib)
+    print("=" * 56)
+    print(f"Python      : {platform.python_version()}  ({sys.executable})")
+    print(f"uvicorn     : {uvicorn.__version__}")
+    print(f"{ws_lib:<12}: {getattr(ws_mod, '__version__', '?')}")
+    print(f"torch       : {torch.__version__}  (device: {DEVICE})")
+    print(f"classes     : {len(CLASSES)}")
+    print("=" * 56)
     print(f"WebSocket support: OK (using '{ws_lib}')")
     print("Open the demo at:  http://127.0.0.1:8000")
     print("Health check:      http://127.0.0.1:8000/health")
