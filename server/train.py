@@ -23,8 +23,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader, TensorDataset
+
+# NOTE: sklearn is imported lazily inside main() — server.py imports
+# GestureMLP from this module, and the hosted server (requirements-deploy.txt)
+# ships without scikit-learn.
 
 from utils import FEATURES, mirror_landmarks
 
@@ -67,6 +70,8 @@ def augment(X: np.ndarray, y: np.ndarray):
 
 
 def main():
+    from sklearn.model_selection import train_test_split
+
     data = Path("data")
     X = np.load(data / "X.npy")
     y = np.load(data / "y.npy")

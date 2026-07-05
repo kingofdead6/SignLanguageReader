@@ -167,48 +167,62 @@ export default function RecognizePanel() {
   };
 
   return (
-    <section className="bg-panel border border-edge rounded-2xl p-5 flex flex-col gap-4">
-      <header className="flex items-baseline justify-between">
-        <h2 className="font-display font-700 tracking-wide text-recognize">
+    <section className="bg-panel border border-edge rounded-2xl p-5 flex flex-col gap-4
+                        shadow-[0_16px_40px_-20px_rgba(0,0,0,0.8)]">
+      <header className="flex items-center justify-between gap-3">
+        <h2 className="font-display font-700 tracking-[0.14em] text-recognize flex items-center gap-2.5">
+          <span className="w-1.5 h-5 rounded-full bg-recognize/80" aria-hidden="true" />
           CAMERA → TEXT
         </h2>
-        <span className={`text-xs ${live ? "text-recognize" : "text-mist"}`}>
-          {live ? "● " : ""}{status}
+        <span className="flex items-center gap-2 text-xs text-mist bg-well border border-edge
+                         rounded-full pl-2.5 pr-3 py-1 max-w-[55%]">
+          <span className={`shrink-0 w-2 h-2 rounded-full ${
+            live ? "bg-recognize pulse-dot" : "bg-mist/50"}`} aria-hidden="true" />
+          <span className="truncate">{status}</span>
         </span>
       </header>
 
-      <div className="relative rounded-xl overflow-hidden bg-well">
+      <div className="relative rounded-xl overflow-hidden bg-well border border-edge aspect-4/3">
         <video ref={videoRef} autoPlay playsInline muted
-               className="w-full block -scale-x-100" />
+               className="w-full h-full object-cover block -scale-x-100" />
         <canvas ref={canvasRef}
                 className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100" />
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-5">
         <div key={flash}
-             className={`font-display text-5xl font-700 min-w-16 text-center text-recognize ${
-               flash ? "commit-flash" : ""}`}>
+             className={`font-display text-5xl font-700 min-w-20 py-1 text-center text-recognize
+                         bg-well border border-edge rounded-xl ${flash ? "commit-flash" : ""}`}>
           {gesture}
         </div>
         <div className="flex-1">
-          <div className="h-1.5 rounded bg-edge overflow-hidden">
-            <div className="h-full bg-recognize transition-[width] duration-100"
-                 style={{ width: `${Math.round(confidence * 100)}%` }} />
+          <div className="flex items-baseline justify-between text-xs text-mist mb-1.5">
+            <span>confidence</span>
+            <span className="tabular-nums text-ink/80">{Math.round(confidence * 100)}%</span>
           </div>
-          <div className="text-xs text-mist mt-1">
-            {Math.round(confidence * 100)}% confidence
+          <div className="h-1.5 rounded-full bg-edge overflow-hidden"
+               role="meter" aria-label="prediction confidence"
+               aria-valuemin={0} aria-valuemax={100}
+               aria-valuenow={Math.round(confidence * 100)}>
+            <div className="h-full rounded-full bg-recognize transition-[width] duration-100"
+                 style={{ width: `${Math.round(confidence * 100)}%` }} />
           </div>
         </div>
       </div>
 
-      <div className="bg-well border border-edge rounded-xl px-4 py-3">
-        <span className="text-xl tracking-widest break-all">{sentence}</span>
-        <span className="inline-block w-0.5 h-5 align-text-bottom bg-recognize cursor-blink" />
+      <div className="bg-well border border-edge rounded-xl px-4 py-3 min-h-13">
+        {sentence
+          ? <span className="text-xl tracking-widest break-all">{sentence}</span>
+          : <span className="text-sm text-mist/60 tracking-wide">
+              hold a letter steady to write…
+            </span>}
+        <span className="inline-block w-0.5 h-5 ml-0.5 align-text-bottom bg-recognize cursor-blink" />
       </div>
 
       <button onClick={clear}
               className="self-start text-sm text-mist border border-edge rounded-lg px-4 py-2
-                         hover:text-recognize hover:border-recognize transition-colors">
+                         cursor-pointer hover:text-recognize hover:border-recognize/60
+                         hover:bg-recognize/5 active:scale-[0.98] transition-all">
         Clear sentence
       </button>
     </section>

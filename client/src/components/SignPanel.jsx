@@ -184,12 +184,17 @@ export default function SignPanel() {
   }
 
   return (
-    <section className="bg-panel border border-edge rounded-2xl p-5 flex flex-col gap-4">
-      <header className="flex items-baseline justify-between">
-        <h2 className="font-display font-700 tracking-wide text-synth">
+    <section className="bg-panel border border-edge rounded-2xl p-5 flex flex-col gap-4
+                        shadow-[0_16px_40px_-20px_rgba(0,0,0,0.8)]">
+      <header className="flex items-center justify-between gap-3">
+        <h2 className="font-display font-700 tracking-[0.14em] text-synth flex items-center gap-2.5">
+          <span className="w-1.5 h-5 rounded-full bg-synth/80" aria-hidden="true" />
           TEXT → SIGN
         </h2>
-        <span className="text-xs text-mist">{status}</span>
+        <span className="text-xs text-mist bg-well border border-edge rounded-full
+                         px-3 py-1 max-w-[55%] truncate">
+          {status}
+        </span>
       </header>
 
       <div className="flex gap-2 flex-wrap">
@@ -200,31 +205,39 @@ export default function SignPanel() {
           maxLength={60}
           placeholder="Type something… e.g. HELLO"
           className="flex-1 min-w-44 bg-well border border-edge rounded-lg px-4 py-2.5
-                     tracking-widest outline-none focus:border-synth transition-colors"
+                     tracking-widest outline-none placeholder:text-mist/50
+                     focus:border-synth/70 focus:ring-2 focus:ring-synth/15 transition-all"
         />
         <button
           onClick={play}
           disabled={!ready}
-          className="text-sm border border-edge rounded-lg px-4 py-2 text-mist
-                     hover:text-synth hover:border-synth transition-colors
-                     disabled:opacity-40 disabled:hover:text-mist disabled:hover:border-edge"
+          className="text-sm font-600 border border-synth/50 bg-synth/10 text-synth
+                     rounded-lg px-4 py-2 cursor-pointer
+                     hover:bg-synth/20 hover:border-synth active:scale-[0.98] transition-all
+                     disabled:opacity-40 disabled:cursor-default
+                     disabled:hover:bg-synth/10 disabled:hover:border-synth/50"
         >
           ▶ Sign it
         </button>
         <button
           onClick={stop}
-          className="text-sm border border-edge rounded-lg px-4 py-2 text-mist
-                     hover:text-synth hover:border-synth transition-colors"
+          className="text-sm border border-edge rounded-lg px-4 py-2 text-mist cursor-pointer
+                     hover:text-synth hover:border-synth/60 hover:bg-synth/5
+                     active:scale-[0.98] transition-all"
         >
           ■ Stop
         </button>
       </div>
 
-      <div className="min-h-7 text-lg tracking-[0.35em]">
+      <div className="min-h-7 text-lg tracking-[0.35em]" aria-live="polite">
         {letters.map((l, i) => (
           <span
             key={i}
-            className={l.active ? "text-synth font-600" : "text-mist"}
+            className={
+              l.active
+                ? "text-synth font-600 drop-shadow-[0_0_10px_rgba(245,184,76,0.6)]"
+                : "text-mist/70"
+            }
           >
             {l.ch}
           </span>
@@ -235,7 +248,7 @@ export default function SignPanel() {
         ref={canvasRef}
         width={CANVAS_W}
         height={CANVAS_H}
-        className="bg-well rounded-xl mx-auto max-w-full"
+        className="bg-well border border-edge rounded-xl mx-auto max-w-full"
       />
     </section>
   );

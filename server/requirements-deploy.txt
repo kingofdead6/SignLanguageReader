@@ -1,0 +1,13 @@
+# Server-only dependencies for hosting (Render/Railway/Docker).
+#
+# Deliberately EXCLUDES mediapipe, opencv, kagglehub, scikit-learn, tqdm —
+# those are for local data collection/training only. The hosted server just
+# runs the MLP on landmark vectors the browser sends.
+#
+# The extra index makes pip pick CPU-only torch wheels on Linux (~200 MB)
+# instead of the default CUDA build (~2.5 GB, which blows hosting limits).
+--extra-index-url https://download.pytorch.org/whl/cpu
+fastapi>=0.110
+uvicorn[standard]>=0.29
+numpy>=2.0
+torch>=2.6

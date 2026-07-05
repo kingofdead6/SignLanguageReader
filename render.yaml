@@ -1,0 +1,18 @@
+# Render blueprint — deploy with "New > Blueprint" pointing at this repo,
+# or mirror these settings manually in a "New > Web Service".
+services:
+  - type: web
+    name: signlanguagereader
+    runtime: python
+    rootDir: server
+    plan: free
+    buildCommand: pip install -r requirements-deploy.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      # Lock this down to your hosted frontend origin(s) once you deploy it,
+      # e.g. https://yourapp.vercel.app — comma-separated, no trailing slash.
+      - key: ALLOWED_ORIGINS
+        value: "*"
