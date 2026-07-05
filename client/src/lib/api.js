@@ -1,12 +1,11 @@
 // Central API configuration.
 //
-// DEV (default, VITE_API_BASE unset):
-//   - HTTP -> same-origin /poses, /sign, ... proxied by Vite (vite.config.js)
-//   - WS   -> DIRECT to the backend. WebSockets aren't subject to CORS,
-//     so the proxy adds nothing — and Vite's ws proxy is flaky on
-//     Windows (write ECONNABORTED), so we bypass it.
-//
-// PROD: set VITE_API_BASE=https://your-api-domain.com in .env before build.
+// DEV (VITE_API_BASE unset):
+//   HTTP -> same-origin, proxied by Vite; WS -> direct to local backend.
+// PROD:
+//   Set VITE_API_BASE in .env.production, then `npm run build`.
+//   (To test the hosted API from the dev server: put it in .env.local
+//   and restart `npm run dev`.)
 const raw = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 
 export const API_BASE = raw
@@ -15,10 +14,9 @@ export const API_BASE = raw
 
 export const WS_URLS = (() => {
   if (!raw) {
-    // Direct to the backend in dev; IPv4 loopback first, localhost fallback.
     return ["ws://127.0.0.1:8000/ws", "ws://localhost:8000/ws"];
   }
-  const toWs = (b) => b.replace(/^http/, "ws") + "/ws";
+  const toWs = (b) => b.replace(/^http/, "ws") + "/ws"; // https -> wss
   const urls = [toWs(API_BASE)];
   if (API_BASE.includes("//localhost")) {
     urls.push(toWs(API_BASE.replace("//localhost", "//127.0.0.1")));

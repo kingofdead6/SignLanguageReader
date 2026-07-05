@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { FilesetResolver, HandLandmarker } from "@mediapipe/tasks-vision";
-import { WS_URLS } from "../lib/api";
+import { API_BASE, WS_URLS } from "../lib/api";
 import { drawSkeleton } from "../lib/hand";
 
 const SEND_FPS = 20;
@@ -17,7 +17,7 @@ export default function RecognizePanel() {
   const [gesture, setGesture] = useState("–");
   const [confidence, setConfidence] = useState(0);
   const [sentence, setSentence] = useState("");
-  const [flash, setFlash] = useState(0); // increments to retrigger animation
+  const [flash, setFlash] = useState(0);
 
   useEffect(() => {
     const S = stateRef.current;
@@ -34,24 +34,49 @@ export default function RecognizePanel() {
       ws.onopen = () => {
         opened = true;
         setLive(true);
-        setStatus(`live · ${url}`);
+        setStatus("socket open — waiting for server hello…");
       };
       ws.onclose = () => {
         if (!S.alive) return;
-        if (!opened) S.wsIdx++; // never connected -> try the other host
+        if (!opened) S.wsIdx++; // never connected -> try the other candidate
         setLive(false);
-        setStatus(`API disconnected — retrying ${WS_URLS[S.wsIdx % WS_URLS.length]} …`);
+        setStatus("API disconnected — retrying…");
         setTimeout(connect, 1500);
       };
       ws.onmessage = (e) => {
         let d;
-        try { d = JSON.parse(e.data); } catch { return; } // ignore non-JSON
-        if (!d || d.type !== "frame") return;
+        try { d = JSON.parse(e.data); } catch { return; }
+        if (!d) return;
+        if (d.type === "hello") {
+          // Backend's connection sign, mirrored to the UI
+          setStatus(`live · session #${d.session} · ${d.classes} classes`);
+          return;
+        }
+        if (d.type !== "frame") return;
         setGesture(d.gesture === "nothing" ? "–" : d.gesture);
         setConfidence(d.confidence);
         setSentence(d.sentence);
         if (d.committed) setFlash((f) => f + 1);
       };
+    }
+
+    // Free-tier hosts sleep when idle; an HTTP hit wakes them. Ping
+    // /health first so the WS isn't hammering a cold box.
+    async function wakeThenConnect() {
+      setStatus("waking API… (cold start can take up to a minute)");
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 70000);
+        const r = await fetch(`${API_BASE}/health`, { signal: ctrl.signal });
+        clearTimeout(t);
+        const d = await r.json();
+        if (!S.alive) return;
+        setStatus(`API awake (${d.classes} classes) — opening socket…`);
+      } catch {
+        if (!S.alive) return;
+        setStatus("health check failed — trying WebSocket anyway…");
+      }
+      connect();
     }
 
     async function init() {
@@ -82,7 +107,7 @@ export default function RecognizePanel() {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
 
-      connect();
+      wakeThenConnect();
       loop();
     }
 
@@ -153,34 +178,22 @@ export default function RecognizePanel() {
       </header>
 
       <div className="relative rounded-xl overflow-hidden bg-well">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full block -scale-x-100"
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100"
-        />
+        <video ref={videoRef} autoPlay playsInline muted
+               className="w-full block -scale-x-100" />
+        <canvas ref={canvasRef}
+                className="absolute inset-0 w-full h-full pointer-events-none -scale-x-100" />
       </div>
 
       <div className="flex items-center gap-4">
-        <div
-          key={flash}
-          className={`font-display text-5xl font-700 min-w-16 text-center text-recognize ${
-            flash ? "commit-flash" : ""
-          }`}
-        >
+        <div key={flash}
+             className={`font-display text-5xl font-700 min-w-16 text-center text-recognize ${
+               flash ? "commit-flash" : ""}`}>
           {gesture}
         </div>
         <div className="flex-1">
           <div className="h-1.5 rounded bg-edge overflow-hidden">
-            <div
-              className="h-full bg-recognize transition-[width] duration-100"
-              style={{ width: `${Math.round(confidence * 100)}%` }}
-            />
+            <div className="h-full bg-recognize transition-[width] duration-100"
+                 style={{ width: `${Math.round(confidence * 100)}%` }} />
           </div>
           <div className="text-xs text-mist mt-1">
             {Math.round(confidence * 100)}% confidence
@@ -193,11 +206,9 @@ export default function RecognizePanel() {
         <span className="inline-block w-0.5 h-5 align-text-bottom bg-recognize cursor-blink" />
       </div>
 
-      <button
-        onClick={clear}
-        className="self-start text-sm text-mist border border-edge rounded-lg px-4 py-2
-                   hover:text-recognize hover:border-recognize transition-colors"
-      >
+      <button onClick={clear}
+              className="self-start text-sm text-mist border border-edge rounded-lg px-4 py-2
+                         hover:text-recognize hover:border-recognize transition-colors">
         Clear sentence
       </button>
     </section>

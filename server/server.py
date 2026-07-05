@@ -6,12 +6,17 @@ and sends them here. The server only normalizes + runs the MLP. This keeps
 hosting cheap: payloads are ~1 KB/frame and inference is a 50k-param MLP.
 
 Endpoints:
-  GET  /health     -> {"status": "ok"}  (for uptime checks / Render health)
+  GET  /health     -> {"status": "ok", ...live stats}  (uptime checks +
+                      remote traffic monitoring: ws_sessions_total,
+                      ws_active_now, frames_processed)
   POST /predict    -> stateless single prediction (for your own API integrations)
         body: {"landmarks": [[x, y, z] * 21]}
         resp: {"gesture": "A", "confidence": 0.94, "top3": [...]}
   WS   /ws         -> stateful real-time session (debounce + sentence builder,
                       one independent session per connection)
+        server sends FIRST, on connect:
+                      {"type": "hello", "server": "sign-language-api",
+                       "session": 1, "classes": 29}
         client sends: {"type": "landmarks", "landmarks": [[x,y,z]*21]}
                       {"type": "empty"}            (no hand this frame)
                       {"type": "clear"}            (reset sentence)
@@ -19,16 +24,23 @@ Endpoints:
                       {"type": "frame", "gesture": "A", "confidence": 0.94,
                        "sentence": "HELLO", "committed": false}
 
-Deploy notes:
-  - Only needs: model/model.pt, model/classes.json, utils.py, train.py
-  - Set ALLOWED_ORIGINS below to your frontend domain(s) before production.
-  - Run: uvicorn server:app --host 0.0.0.0 --port 8000
-    (or python server.py locally)
+Deploy notes (Render / Railway / any container host):
+  - Needs: model/model.pt, model/classes.json, model/poses.json,
+    utils.py, train.py
+  - requirements.txt MUST have "uvicorn[standard]" (plain uvicorn serves
+    HTTP but silently rejects every WebSocket upgrade).
+  - Start command:  uvicorn server:app --host 0.0.0.0 --port $PORT
+  - Env vars:
+        ALLOWED_ORIGINS=https://yourfrontend.com,https://www.yourfrontend.com
+        PORT=<injected by the host; local default 8000>
+  - Every WS connection prints an unmissable [CONNECT] banner in the host
+    logs, and /health exposes live counters you can check from any browser.
 
 Usage:
   python server.py         # local test: open http://localhost:8000
 """
 import json
+import os
 import sys
 import time
 from collections import Counter, deque
@@ -49,9 +61,17 @@ STABLE_VOTES = 12      # frames that must agree before committing
 CONF_THRESHOLD = 0.80  # mean softmax confidence required
 COOLDOWN = 1.2         # seconds before the SAME letter can repeat
 
-# Lock this down to your real frontend origin(s) when you deploy,
-# e.g. ["https://yourportfolio.com"]
-ALLOWED_ORIGINS = ["*"]
+# CORS — set on your host, e.g.
+#   ALLOWED_ORIGINS=https://yourportfolio.com,https://www.yourportfolio.com
+# Falls back to * so local dev needs zero setup.
+ALLOWED_ORIGINS = [o.strip()
+                   for o in os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+                   if o.strip()]
+
+# Live counters — printed on every connect, exposed on /health so you can
+# check for traffic from any browser without opening the host's log tab.
+STATS = {"started": time.time(), "ws_total": 0,
+         "ws_active": 0, "frames_total": 0}
 # -------------------------------------------
 
 DEBUG = True   # set False to silence [debug] prints
@@ -88,6 +108,8 @@ async def _log_shutdown():
     # inside the console can pause it (press Esc to resume).
     print("[lifespan] SHUTDOWN signal received (Ctrl+C / SIGTERM / window "
           "closed) — the server is stopping NOW.", flush=True)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -127,7 +149,14 @@ class LandmarksIn(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "classes": len(CLASSES)}
+    return {
+        "status": "ok",
+        "classes": len(CLASSES),
+        "uptime_s": round(time.time() - STATS["started"]),
+        "ws_sessions_total": STATS["ws_total"],
+        "ws_active_now": STATS["ws_active"],
+        "frames_processed": STATS["frames_total"],
+    }
 
 
 @app.post("/predict")
@@ -191,9 +220,31 @@ class Session:
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     client = f"{ws.client.host}:{ws.client.port}" if ws.client else "?"
-    dbg(f"WS upgrade request from {client}")
+    origin = ws.headers.get("origin", "-")
     await ws.accept()
-    dbg(f"WS ACCEPTED {client} — session started")
+
+    STATS["ws_total"] += 1
+    STATS["ws_active"] += 1
+    session_id = STATS["ws_total"]
+    t0 = time.time()
+
+    # ---- THE SIGN: unmissable in Render/host logs ----
+    print("=" * 56, flush=True)
+    print(f"[CONNECT] session #{session_id}", flush=True)
+    print(f"[CONNECT] client : {client}", flush=True)
+    print(f"[CONNECT] origin : {origin}", flush=True)
+    print(f"[CONNECT] active : {STATS['ws_active']} session(s) now",
+          flush=True)
+    print("=" * 56, flush=True)
+
+    # Mirror it to the client so the UI proves it reached the real API
+    await ws.send_text(json.dumps({
+        "type": "hello",
+        "server": "sign-language-api",
+        "session": session_id,
+        "classes": len(CLASSES),
+    }))
+
     session = Session()
     n_msgs = 0
     try:
@@ -233,6 +284,7 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.send_text(json.dumps(
                         {"type": "error", "detail": str(e)}))
                     continue
+                STATS["frames_total"] += 1
                 probs = predict_vec(normalize_landmarks(arr))
                 idx = int(probs.argmax())
                 conf = float(probs[idx])
@@ -245,13 +297,17 @@ async def ws_endpoint(ws: WebSocket):
                     "committed": committed,
                 }))
     except WebSocketDisconnect as e:
-        dbg(f"WS {client} disconnected cleanly (code={e.code}, "
-            f"{n_msgs} messages total)")
+        dbg(f"WS {client} disconnected cleanly (code={e.code})")
     except Exception as e:
         import traceback
         print(f"[debug] WS {client} CRASHED: {type(e).__name__}: {e}",
               flush=True)
         traceback.print_exc()
+    finally:
+        STATS["ws_active"] -= 1
+        print(f"[DISCONNECT] session #{session_id}  client={client}  "
+              f"lasted={round(time.time() - t0, 1)}s  msgs={n_msgs}  "
+              f"active_now={STATS['ws_active']}", flush=True)
 
 
 # ---------------- Text -> Sign: letter poses for the client animation ----
@@ -396,14 +452,17 @@ if __name__ == "__main__":
     import uvicorn
     ws_lib = _check_websocket_support()
     ws_mod = __import__(ws_lib)
+    port = int(os.environ.get("PORT", 8000))
     print("=" * 56)
     print(f"Python      : {platform.python_version()}  ({sys.executable})")
     print(f"uvicorn     : {uvicorn.__version__}")
     print(f"{ws_lib:<12}: {getattr(ws_mod, '__version__', '?')}")
     print(f"torch       : {torch.__version__}  (device: {DEVICE})")
     print(f"classes     : {len(CLASSES)}")
+    print(f"CORS origins: {ALLOWED_ORIGINS}")
     print("=" * 56)
     print(f"WebSocket support: OK (using '{ws_lib}')")
-    print("Open the demo at:  http://127.0.0.1:8000")
-    print("Health check:      http://127.0.0.1:8000/health")
-    uvicorn.run(app, host="0.0.0.0", port=8000, ws="auto", log_level="info")
+    print(f"Open the demo at:  http://127.0.0.1:{port}")
+    print(f"Health check:      http://127.0.0.1:{port}/health")
+    uvicorn.run(app, host="0.0.0.0", port=port, ws="auto",
+                log_level="info")
